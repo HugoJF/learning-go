@@ -15,24 +15,55 @@ package main
 
 import (
 	"errors"
-	"flag"
+	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"github.com/lukaslueg/dumpcap"
+	"github.com/manifoldco/promptui"
 	"log"
 	"net"
 	"sync"
 )
 
-var (
-	ifacename = flag.String("iface", "Ethernet", "Interface name")
-	deviceid = flag.String("deviceid", "eth0", "Interface device ID")
-)
-
 func main() {
-	flag.Parse()
+	fmt.Println(dumpcap.VersionString())
 
-	log.Printf("Interface device ID %v", *deviceid)
+	devices, err := dumpcap.Devices(false)
+	if err != nil {
+		panic(err)
+	}
+
+	var ifacesnames []string
+	for _, dev := range devices {
+		ifacesnames = append(ifacesnames, dev.FriendlyName)
+	}
+
+	prompt := promptui.Select{
+		Label: "Select interface to sniff",
+		Items: ifacesnames,
+	}
+
+	_, ifacename, err := prompt.Run()
+
+	if err != nil {
+		panic(err)
+	}
+
+	log.Printf("Running on interface: %v", ifacename)
+
+	var deviceid string
+	for _, dev := range devices {
+		if dev.FriendlyName == ifacename {
+			deviceid = dev.Name
+			break
+		}
+	}
+
+	if deviceid == "" {
+		log.Printf("Failed to relocate device ID")
+		return
+	}
 
 	// Get a list of all interfaces.
 	ifaces, err := net.Interfaces()
@@ -46,10 +77,10 @@ func main() {
 		// Start up a scan on each interface.
 		go func(iface net.Interface) {
 			defer wg.Done()
-			if iface.Name != *ifacename {
+			if iface.Name != ifacename {
 				return
 			}
-			if err := scan(&iface, *deviceid); err != nil {
+			if err := scan(&iface, deviceid); err != nil {
 				log.Printf("interface %v: %v", iface.Name, err)
 			}
 		}(iface)
