@@ -19,7 +19,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"github.com/lukaslueg/dumpcap"
+	"github.com/hugojf/dumpcap"
 	"github.com/manifoldco/promptui"
 	"log"
 	"net"
