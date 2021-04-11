@@ -23,7 +23,6 @@ import (
 	"github.com/manifoldco/promptui"
 	"log"
 	"net"
-	"sync"
 )
 
 func main() {
@@ -65,30 +64,23 @@ func main() {
 		return
 	}
 
-	// Get a list of all interfaces.
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		panic(err)
-	}
+	done := make(chan bool)
 
-	var wg sync.WaitGroup
-	for _, iface := range ifaces {
-		wg.Add(1)
-		// Start up a scan on each interface.
-		go func(iface net.Interface) {
-			defer wg.Done()
-			if iface.Name != ifacename {
-				return
-			}
-			if err := scan(&iface, deviceid); err != nil {
-				log.Printf("interface %v: %v", iface.Name, err)
-			}
-		}(iface)
-	}
-	// Wait for all interfaces' scans to complete.  They'll try to run
-	// forever, but will stop on an error, so if we get past this Wait
-	// it means all attempts to write have failed.
-	wg.Wait()
+	go func() {
+		iface, err := net.InterfaceByName(ifacename)
+
+		if err != nil {
+			panic(err)
+		}
+
+		if err := scan(iface, deviceid); err != nil {
+			log.Printf("interface %v: %v", iface.Name, err)
+		}
+
+		done <- true
+	}()
+
+	<- done
 }
 
 // scan scans an individual interface's local network for machines using ARP requests/replies.
@@ -158,6 +150,6 @@ func read(handle *pcap.Handle) {
 		// Note:  we might get some packets here that aren't responses to ones we've sent,
 		// if for example someone else sends US an ARP request.  Doesn't much matter, though...
 		// all information is good information :)
-		log.Printf("Received %v packets from %v", counter[ipv4.SrcIP.String()], ipv4.SrcIP)
+		log.Printf("Received %v packets with source %v", counter[ipv4.SrcIP.String()], ipv4.SrcIP)
 	}
 }
