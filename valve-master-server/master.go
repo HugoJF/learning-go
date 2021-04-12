@@ -2,89 +2,87 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
+	"errors"
 	"fmt"
-	"log"
 	"net"
-	"sync"
 	"time"
+	"valve-master-server/valve"
 )
 
-var (
-	header   = []byte{0x31}
-	response = []byte{0xff, 0xff, 0xff, 0xff, 0x66, 0x0a}
-	seeds    = make(chan string)
-	ips      = make(chan string)
-)
+type Query struct {
+	TimeoutDuration time.Duration
+	GiveUpDuration  time.Duration
+	Ips             []string
+	region          uint8
+	done            chan bool
+	seeds           chan string
+}
 
 const (
 	ZeroIp string = "0.0.0.0:0"
-	// regions
-	UsEastCoast  byte = 0x00
-	UsWestCoast  byte = 0x01
-	SouthAmerica byte = 0x02
-	Europe       byte = 0x03
-	Asia         byte = 0x04
-	Australia    byte = 0x05
-	MiddleEast   byte = 0x06
-	Africa       byte = 0x07
-	RestOfWorld  byte = 0xff
 )
 
-//printIps receives any parsed IP and adds to main list
-func printIps() {
-	var all []string
-	for {
-		ip := <-ips
-		all = append(all, ip)
-		fmt.Printf("Received %d: %s\n", len(all), ip)
+func NewQuery(region string) (*Query, error) {
+	code, ok := valve.Regions[region]
+	
+	if ok == false {
+		return nil, errors.New(fmt.Sprintf("'%s' is not a valid region", region))
 	}
+
+	return &Query{
+		region:          code,
+		TimeoutDuration: 10 * time.Second,
+		GiveUpDuration:  30 * time.Second,
+		Ips:             []string{},
+		seeds:           make(chan string),
+		done:            make(chan bool),
+	}, nil
 }
 
-func ToZeroString(s string) []byte {
-	return append([]byte(s), 0x00)
-}
-
-//sendQuery send master server queries
-func sendQuery(conn *net.UDPConn) {
-	duration := 10 * time.Second
-	timeout := time.NewTicker(duration)
+//sendPacket send master server queries
+func (q *Query) sendPacket(conn *net.UDPConn) {
+	timeout := time.NewTicker(q.TimeoutDuration)
+	giveup := time.NewTicker(q.GiveUpDuration)
 	ratelimit := time.Tick(time.Second)
 
 	var seed string
 
 	for {
 		select {
-		case s := <-seeds:
-			seed = s; break
+		case s := <-q.seeds:
+			seed = s
+			giveup.Reset(q.GiveUpDuration)
+			break
 		case <-timeout.C:
-			timeout.Reset(duration); break
+			timeout.Reset(q.TimeoutDuration)
+			break
+		case <-giveup.C:
+			q.done <- true
+			return
 		}
 
 		fmt.Printf("Requesting with seed %s\n", seed)
 		packetParts := [][]byte{
-			header,
-			{SouthAmerica},
-			ToZeroString(seed),
-			ToZeroString("\\dedicated\\1\\linux\\1\\empty\\1\\password\\0\\appid\\730"),
+			valve.Header,
+			{q.region},
+			toZeroString(seed),
+			toZeroString("\\dedicated\\1\\linux\\1\\empty\\1\\password\\0\\appid\\730"),
 		}
 
-		var packet []byte
-		for _, part := range packetParts {
-			packet = append(packet, part...)
-		}
+		packet := bytes.Join(packetParts, nil)
 
 		_, err := conn.Write(packet)
 		if err != nil {
 			fmt.Printf("Couldn't send response %v\n", err)
+			continue
 		}
 
 		<-ratelimit
 	}
 }
 
-//receiveData receives data from UDP connection
-func receiveData(conn *net.UDPConn) {
+//receivePacket receives data from UDP connection
+func (q *Query) receivePacket(conn *net.UDPConn) {
 	buffer := make([]byte, 2048)
 
 	for {
@@ -96,7 +94,7 @@ func receiveData(conn *net.UDPConn) {
 		}
 
 		// Check if response has correct header
-		if bytes.Compare(response, buffer[0:6]) != 0 {
+		if bytes.Compare(valve.Response, buffer[0:6]) != 0 {
 			fmt.Printf("Invalid response: %v", err)
 			continue
 		}
@@ -108,55 +106,42 @@ func receiveData(conn *net.UDPConn) {
 			if ip == ZeroIp {
 				break
 			}
-			ips <- ip
+
 			last = ip
+			fmt.Printf("Received %v\n", ip)
+			q.Ips = append(q.Ips, ip)
 		}
-		seeds <- last
+		q.seeds <- last
 	}
 }
 
-//sliceToIp transform byte slice to string IP
-func sliceToIp(data []byte) string {
-	ipBytes := data[0:4]
-	portBytes := data[4:6]
-
-	ip := net.IP(ipBytes).String()
-	port := binary.BigEndian.Uint16(portBytes)
-
-	return fmt.Sprintf("%s:%d", ip, port)
-}
-
-//main kickstart everything
-func main() {
+func (q *Query) Start() ([]string, error) {
 	ip, err := net.ResolveIPAddr("ip4", "hl2master.steampowered.com")
 
 	if err != nil {
-		log.Panic(err)
+		return nil, err
 	}
 
 	addr := net.UDPAddr{
 		Port: 27011,
-		IP:   ip.IP, // FIXME: resolve from hostname
+		IP:   ip.IP,
 	}
 
 	fmt.Println("Dialing connection")
 	conn, err := net.DialUDP("udp", nil, &addr)
 
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	fmt.Println("Entering loop")
 
-	go sendQuery(conn)
-	go receiveData(conn)
-	go printIps()
+	go q.sendPacket(conn)
+	go q.receivePacket(conn)
 
-	seeds <- ZeroIp
+	q.seeds <- ZeroIp
 
-	// Wait forever
-	// TODO: this should become a reply
-	var wg sync.WaitGroup
-	wg.Add(1)
-	wg.Wait()
+	<-q.done
+
+	return q.Ips, nil
 }
