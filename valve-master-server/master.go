@@ -47,10 +47,21 @@ func ToZeroString(s string) []byte {
 
 //sendQuery send master server queries
 func sendQuery(conn *net.UDPConn) {
+	duration := 10 * time.Second
+	timeout := time.NewTicker(duration)
 	ratelimit := time.Tick(time.Second)
-	for {
-		seed := <-seeds
 
+	var seed string
+
+	for {
+		select {
+		case s := <-seeds:
+			seed = s; break
+		case <-timeout.C:
+			timeout.Reset(duration); break
+		}
+
+		fmt.Printf("Requesting with seed %s\n", seed)
 		packetParts := [][]byte{
 			header,
 			{SouthAmerica},
@@ -68,7 +79,7 @@ func sendQuery(conn *net.UDPConn) {
 			fmt.Printf("Couldn't send response %v\n", err)
 		}
 
-		<- ratelimit
+		<-ratelimit
 	}
 }
 
@@ -144,7 +155,7 @@ func main() {
 	seeds <- ZeroIp
 
 	// Wait forever
-	// TODO: this should become a timeout
+	// TODO: this should become a reply
 	var wg sync.WaitGroup
 	wg.Add(1)
 	wg.Wait()
