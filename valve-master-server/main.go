@@ -3,35 +3,22 @@ package main
 import (
 	"fmt"
 	"log"
-	"sync"
+	"valve-master-server/protocol"
 )
 
 func main() {
-	q1, err1 := NewQuery("RestOfWorld")
-	q2, err2 := NewQuery("Australia")
+	q1, err1 := protocol.NewQuery("RestOfWorld")
+	//q2, err2 := NewQuery("Australia")
 
 	if err1 != nil {
 		log.Fatal("Error creating query 1", err1)
 	}
-	if err2 != nil {
-		log.Fatal("Error creating query 2", err2)
+
+	all, err := q1.Start()
+
+	if err != nil {
+		log.Fatal("Failed to query servers", err)
 	}
 
-	var all []string
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		ips, _ := q1.Start()
-		all = append(all, ips...)
-		wg.Done()
-	}()
-
-	go func() {
-		ips, _ := q2.Start()
-		all = append(all, ips...)
-		wg.Done()
-	}()
-	wg.Wait()
 	fmt.Println(all)
 }
