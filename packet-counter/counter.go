@@ -14,8 +14,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -23,6 +25,11 @@ import (
 	"github.com/manifoldco/promptui"
 	"log"
 	"net"
+	"time"
+)
+
+var (
+	ctx = context.Background()
 )
 
 func main() {
@@ -33,9 +40,15 @@ func main() {
 		panic(err)
 	}
 
+	log.Printf("Found %d device\n", len(devices))
+
 	var ifacesnames []string
 	for _, dev := range devices {
-		ifacesnames = append(ifacesnames, dev.FriendlyName)
+		if dev.FriendlyName != "" {
+			ifacesnames = append(ifacesnames, dev.FriendlyName)
+		} else {
+			ifacesnames = append(ifacesnames, dev.Name)
+		}
 	}
 
 	prompt := promptui.Select{
@@ -53,7 +66,10 @@ func main() {
 
 	var deviceid string
 	for _, dev := range devices {
-		if dev.FriendlyName == ifacename {
+		if dev.Name == ifacename {
+			deviceid = ifacename
+			break
+		} else if dev.FriendlyName == ifacename {
 			deviceid = dev.Name
 			break
 		}
@@ -80,7 +96,7 @@ func main() {
 		done <- true
 	}()
 
-	<- done
+	<-done
 }
 
 // scan scans an individual interface's local network for machines using ARP requests/replies.
@@ -137,7 +153,13 @@ func scan(iface *net.Interface, deviceid string) error {
 func read(handle *pcap.Handle) {
 	src := gopacket.NewPacketSource(handle, layers.LayerTypeEthernet)
 	in := src.Packets()
-	counter := make(map[string]int)
+
+	red := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+
 	for {
 		packet := <-in
 		ipLayer := packet.Layer(layers.LayerTypeIPv4)
@@ -145,11 +167,35 @@ func read(handle *pcap.Handle) {
 			continue
 		}
 		ipv4 := ipLayer.(*layers.IPv4)
+		ip := ipv4.SrcIP.String()
 
-		counter[ipv4.SrcIP.String()]++
+		_, err := red.Get(ctx, ip).Result()
+
+		// Assert count is set to something
+		switch {
+		case err == redis.Nil:
+			red.Set(ctx, ip, 0, 30 * time.Second)
+		case err != nil:
+			continue
+		}
+
+		// Increment IP count
+		val, err := red.Incr(ctx, ip).Result()
+
+		if err != nil {
+			continue
+		}
+
+		// Get all IPs tracked
+		keys, err := red.Keys(ctx, "*").Result()
+
+		if err != nil {
+			continue
+		}
+
 		// Note:  we might get some packets here that aren't responses to ones we've sent,
 		// if for example someone else sends US an ARP request.  Doesn't much matter, though...
 		// all information is good information :)
-		log.Printf("Received %v packets with source %v", counter[ipv4.SrcIP.String()], ipv4.SrcIP)
+		log.Printf("Received %v packets with source %v. Tracking %v IPs", val, ipv4.SrcIP, len(keys))
 	}
 }
